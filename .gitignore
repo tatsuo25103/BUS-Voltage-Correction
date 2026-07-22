@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.csv
+calibration_report_*.txt
+*_log*.txt
+logs/
+input/
+tmp/
+tk_runtime_test/
+vendor/
+vendor_runtime/
+python-*-amd64.exe
+installer/*.sed
+release/*.exe
