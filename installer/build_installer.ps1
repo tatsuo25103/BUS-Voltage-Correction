@@ -3,9 +3,9 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $buildRoot = Join-Path $env:TEMP ("BUSVC_Installer_{0}" -f ([Guid]::NewGuid().ToString("N")))
 $stagingRoot = Join-Path $buildRoot "staging"
 $releaseRoot = Join-Path $projectRoot "release"
-$setupPath = Join-Path $releaseRoot "BUS_Voltage_Correction_Setup_V0.7.0.exe"
-$temporarySetupPath = Join-Path $buildRoot "BUS_Voltage_Correction_Setup_V0.7.0.exe"
-$sedPath = Join-Path $buildRoot "BUS_Voltage_Correction_V0.7.0.sed"
+$setupPath = Join-Path $releaseRoot "BUS_Voltage_Correction_Setup_V0.7.1.exe"
+$temporarySetupPath = Join-Path $buildRoot "BUS_Voltage_Correction_Setup_V0.7.1.exe"
+$sedPath = Join-Path $buildRoot "BUS_Voltage_Correction_V0.7.1.sed"
 
 New-Item -ItemType Directory -Path $stagingRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $releaseRoot -Force | Out-Null
@@ -16,6 +16,7 @@ $packageFiles = @(
     @{ Source = (Join-Path $PSScriptRoot "install.cmd"); Name = "install.cmd" },
     @{ Source = (Join-Path $PSScriptRoot "install.ps1"); Name = "install.ps1" },
     @{ Source = (Join-Path $PSScriptRoot "uninstall.ps1"); Name = "uninstall.ps1" },
+    @{ Source = (Join-Path $projectRoot "assets\mes_logo_light.png"); Name = "mes_logo_light.png" },
     @{ Source = (Join-Path $projectRoot "README.md"); Name = "README.md" }
 )
 foreach ($file in $packageFiles) {
@@ -54,11 +55,11 @@ AdminQuietInstCmd=%AdminQuietInstCmd%
 UserQuietInstCmd=%UserQuietInstCmd%
 SourceFiles=SourceFiles
 [Strings]
-InstallPrompt=Install BUS Voltage Correction V0.7 for the current Windows user?
+InstallPrompt=Install BUS Voltage Correction V0.7.1 for the current Windows user?
 DisplayLicense=
-FinishMessage=BUS Voltage Correction V0.7 installation completed.
+FinishMessage=BUS Voltage Correction V0.7.1 installation completed.
 TargetName=$temporarySetupPath
-FriendlyName=BUS Voltage Correction V0.7 Setup
+FriendlyName=BUS Voltage Correction V0.7.1 Setup
 AppLaunched=install.cmd
 PostInstallCmd=<None>
 AdminQuietInstCmd=

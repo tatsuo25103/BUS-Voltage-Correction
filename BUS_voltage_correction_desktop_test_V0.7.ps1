@@ -1,5 +1,6 @@
 ﻿Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Net.Http
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition @"
@@ -33,6 +34,18 @@ $Theme = @{
     Bad = [System.Drawing.Color]::FromArgb(242, 91, 91)
     Info = [System.Drawing.Color]::FromArgb(94, 157, 255)
 }
+
+$script:AppVersion = "0.7.1"
+$script:GitHubRepository = "tatsuo25103/BUS-Voltage-Correction"
+$script:GitHubReleasesUrl = "https://github.com/$($script:GitHubRepository)/releases"
+$script:UpdateCheckTimeoutSeconds = 4.0
+$script:UpdateCheckClient = $null
+$script:UpdateCheckTask = $null
+$script:UpdateCheckTimer = $null
+$script:UpdateCheckStage = $null
+$script:PendingUpdateVersion = $null
+$script:PendingUpdateUrl = $null
+$script:UserDialogActive = $false
 
 $BaudRate = 2400
 $ProbeCommand = "^P003PI"
@@ -94,6 +107,7 @@ $script:EventLogLines = New-Object System.Collections.ArrayList
 $script:CalibrationLogStartIndex = 0
 $script:CalibrationBefore = $null
 $script:CalibrationAfter = $null
+$script:CalibrationInitialVoltages = @{}
 $script:LastSummaryKey = ""
 $script:ManualPending = @{}
 $script:ManualQueueBusy = $false
@@ -124,6 +138,152 @@ function Write-Log($text) {
     }
     $log.SelectionStart = $log.TextLength
     $log.ScrollToCaret()
+}
+
+function Get-VersionParts([string]$value) {
+    $match = [System.Text.RegularExpressions.Regex]::Match($value, "(\d+(?:\.\d+)*)")
+    if (-not $match.Success) { return @() }
+    return @($match.Groups[1].Value.Split(".") | ForEach-Object { [int]$_ })
+}
+
+function Test-IsNewerVersion([string]$latest, [string]$current = $script:AppVersion) {
+    $latestParts = @(Get-VersionParts $latest)
+    $currentParts = @(Get-VersionParts $current)
+    if ($latestParts.Count -eq 0 -or $currentParts.Count -eq 0) { return $false }
+
+    $count = [Math]::Max($latestParts.Count, $currentParts.Count)
+    for ($i = 0; $i -lt $count; $i++) {
+        $latestPart = if ($i -lt $latestParts.Count) { $latestParts[$i] } else { 0 }
+        $currentPart = if ($i -lt $currentParts.Count) { $currentParts[$i] } else { 0 }
+        if ($latestPart -gt $currentPart) { return $true }
+        if ($latestPart -lt $currentPart) { return $false }
+    }
+    return $false
+}
+
+function Stop-GitHubUpdateRequest {
+    if ($script:UpdateCheckTimer) {
+        $script:UpdateCheckTimer.Stop()
+        $script:UpdateCheckTimer.Dispose()
+        $script:UpdateCheckTimer = $null
+    }
+    if ($script:UpdateCheckClient) {
+        $script:UpdateCheckClient.Dispose()
+        $script:UpdateCheckClient = $null
+    }
+    $script:UpdateCheckTask = $null
+    $script:UpdateCheckStage = $null
+    $script:PendingUpdateVersion = $null
+    $script:PendingUpdateUrl = $null
+}
+
+function Start-GitHubUpdateRequest([string]$url, [string]$stage) {
+    if ($script:UpdateCheckClient) {
+        $script:UpdateCheckClient.Dispose()
+    }
+
+    $handler = [System.Net.Http.HttpClientHandler]::new()
+    $handler.UseDefaultCredentials = $true
+    $script:UpdateCheckClient = [System.Net.Http.HttpClient]::new($handler)
+    $script:UpdateCheckClient.Timeout = [TimeSpan]::FromSeconds($script:UpdateCheckTimeoutSeconds)
+    $script:UpdateCheckClient.DefaultRequestHeaders.UserAgent.ParseAdd("BUSVoltageCorrection/$($script:AppVersion)")
+    $script:UpdateCheckClient.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json")
+    $script:UpdateCheckStage = $stage
+    $script:UpdateCheckTask = $script:UpdateCheckClient.GetStringAsync($url)
+}
+
+function Complete-GitHubUpdateCheck {
+    if ($script:PendingUpdateVersion) {
+        if ($script:CalibrationActive -or $script:ManualQueueBusy -or $script:UserDialogActive) { return }
+
+        $latestVersion = $script:PendingUpdateVersion
+        $downloadUrl = $script:PendingUpdateUrl
+        $script:PendingUpdateVersion = $null
+        $script:PendingUpdateUrl = $null
+        Stop-GitHubUpdateRequest
+
+        Write-Log "Update available: $latestVersion (current V$($script:AppVersion))."
+        $script:UserDialogActive = $true
+        try {
+            $answer = [System.Windows.Forms.MessageBox]::Show(
+                $form,
+                "A newer version is available: $latestVersion`r`n`r`nCurrent version: V$($script:AppVersion)`r`n`r`nOpen the download page?",
+                "Update Available",
+                [System.Windows.Forms.MessageBoxButtons]::YesNo,
+                [System.Windows.Forms.MessageBoxIcon]::Information
+            )
+        } finally {
+            $script:UserDialogActive = $false
+        }
+        if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
+            try {
+                Start-Process $downloadUrl
+            } catch {
+                Write-Log "Unable to open update page: $($_.Exception.Message)"
+            }
+        }
+        return
+    }
+
+    if (-not $script:UpdateCheckTask -or -not $script:UpdateCheckTask.IsCompleted) { return }
+
+    $stage = $script:UpdateCheckStage
+    $payload = $null
+    try {
+        $payload = $script:UpdateCheckTask.GetAwaiter().GetResult()
+    } catch {
+        if ($stage -eq "release") {
+            $tagsUrl = "https://api.github.com/repos/$($script:GitHubRepository)/tags?per_page=1"
+            Start-GitHubUpdateRequest $tagsUrl "tag"
+            return
+        }
+        Stop-GitHubUpdateRequest
+        return
+    }
+
+    try {
+        $data = $payload | ConvertFrom-Json
+        if ($stage -eq "release") {
+            $latestVersion = if ($data.tag_name) { [string]$data.tag_name } else { [string]$data.name }
+            $downloadUrl = if ($data.html_url) { [string]$data.html_url } else { $script:GitHubReleasesUrl }
+        } else {
+            $latestTag = @($data) | Select-Object -First 1
+            $latestVersion = if ($latestTag) { [string]$latestTag.name } else { "" }
+            $downloadUrl = $script:GitHubReleasesUrl
+        }
+    } catch {
+        Stop-GitHubUpdateRequest
+        return
+    }
+
+    if (-not $latestVersion -or -not (Test-IsNewerVersion $latestVersion)) {
+        Stop-GitHubUpdateRequest
+        return
+    }
+
+    if ($script:UpdateCheckClient) {
+        $script:UpdateCheckClient.Dispose()
+        $script:UpdateCheckClient = $null
+    }
+    $script:UpdateCheckTask = $null
+    $script:UpdateCheckStage = $null
+    $script:PendingUpdateVersion = $latestVersion
+    $script:PendingUpdateUrl = $downloadUrl
+    Complete-GitHubUpdateCheck
+}
+
+function Start-GitHubUpdateCheck {
+    if ($script:UpdateCheckTask) { return }
+    try {
+        $releaseUrl = "https://api.github.com/repos/$($script:GitHubRepository)/releases/latest"
+        Start-GitHubUpdateRequest $releaseUrl "release"
+        $script:UpdateCheckTimer = New-Object System.Windows.Forms.Timer
+        $script:UpdateCheckTimer.Interval = 250
+        $script:UpdateCheckTimer.Add_Tick({ Complete-GitHubUpdateCheck })
+        $script:UpdateCheckTimer.Start()
+    } catch {
+        Stop-GitHubUpdateRequest
+    }
 }
 
 function Close-SerialConnection {
@@ -536,7 +696,15 @@ function Update-SampleUi($sample) {
         [void]$script:Samples.Add($sample)
         while ($script:Samples.Count -gt 120) { $script:Samples.RemoveAt(0) }
     }
-    $status.Text = "Running"
+    if ($script:CalibrationActive) {
+        $status.Text = "Calibrating"
+    } elseif ($script:ManualQueueBusy) {
+        $status.Text = "Manual"
+    } elseif ($script:MonitoringActive) {
+        $status.Text = "Running"
+    } else {
+        $status.Text = "Ready"
+    }
     Update-StatusPanels $sample
     $bars.Invalidate()
     $trend.Invalidate()
@@ -721,6 +889,9 @@ function Get-CommandStepText($command) {
 }
 
 function Get-ChannelFirstBeforeVoltage($key) {
+    if ($script:CalibrationInitialVoltages.ContainsKey($key)) {
+        return $script:CalibrationInitialVoltages[$key]
+    }
     $firstStep = $script:CalibrationSteps |
         Where-Object { $_.Channel -eq $key -and -not [string]::IsNullOrWhiteSpace($_.Command) -and $null -ne $_.BeforeVoltage } |
         Select-Object -First 1
@@ -949,7 +1120,7 @@ function Write-CalibrationReport($portName, $statusText) {
     $lines.Add("No-response guard: evaluate $ResponseWindowCommands consecutive 0.5V commands in the same direction; stop when net movement is below $($ResponseWindowMovementThreshold)V")
     $lines.Add("Direction guard: opposite movement or worsening error must persist across at least $ResponseDirectionConfirmCommands consecutive commands.")
     $lines.Add("")
-    $lines.Add((Format-SampleLine $script:CalibrationBefore "Before"))
+    $lines.Add((Format-SampleLine $script:CalibrationBefore "Startup sample"))
     $lines.Add((Format-SampleLine $script:CalibrationAfter "After"))
     $lines.Add("")
     $lines.Add("Calibration Summary:")
@@ -991,12 +1162,13 @@ function Calibrate-All($portName) {
     $script:CalibrationLogStartIndex = $script:EventLogLines.Count
     $script:CalibrationBefore = $null
     $script:CalibrationAfter = $null
+    $script:CalibrationInitialVoltages.Clear()
     $script:Samples.Clear()
     $script:TrendBusReady = $false
     $status.Text = "Calibrating"
     $customerStatus.Text = "Checking inverter startup before BUS voltage calibration..."
     $customerStatus.ForeColor = $Theme.Info
-    Write-Log "Starting V0.7 batch calibration on $portName. Max batch rounds: $script:MaxBatchRounds, tolerance=+/-$($script:Tolerance)V, fixed step=0.5V"
+    Write-Log "Starting V$($script:AppVersion) batch calibration on $portName. Max batch rounds: $script:MaxBatchRounds, tolerance=+/-$($script:Tolerance)V, fixed step=0.5V"
     $script:CalibrationBefore = Ensure-InverterReady $portName
     Update-SampleUi $script:CalibrationBefore
     $customerStatus.Text = "Calibrating BUS voltage with 4-channel batch correction..."
@@ -1026,6 +1198,13 @@ function Calibrate-All($portName) {
         $lastSample = $current
         $fatalResult = $null
         $fatalMessage = $null
+
+        foreach ($key in $keys) {
+            if ([bool]$window.Stable[$key] -and -not $script:CalibrationInitialVoltages.ContainsKey($key)) {
+                $script:CalibrationInitialVoltages[$key] = [double]$current.$key
+                Write-Log ("{0}: initial stable voltage recorded at {1:N1}V before correction." -f $key, $current.$key)
+            }
+        }
 
         foreach ($key in @($keys)) {
             if (-not $awaitingResult.ContainsKey($key)) { continue }
@@ -1157,7 +1336,7 @@ function Calibrate-All($portName) {
                 Update-SampleUi $script:CalibrationAfter
                 $customerStatus.Text = "Calibration success: all channels remained stable and within tolerance."
                 $customerStatus.ForeColor = $Theme.Good
-                Write-Log "V0.7 calibration success after two consecutive final verification windows."
+                Write-Log "V$($script:AppVersion) calibration success after two consecutive final verification windows."
                 break
             }
             Write-Log ("Waiting {0:N1}s before the next final verification window." -f $script:PostCorrectionSampleIntervalSeconds)
@@ -1632,8 +1811,30 @@ function Apply-ThemeRecursive($control) {
     }
 }
 
+function Load-UiImage([string]$path) {
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($path)
+        $stream = [System.IO.MemoryStream]::new()
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Position = 0
+        try {
+            $source = [System.Drawing.Image]::FromStream($stream)
+            try {
+                return [System.Drawing.Bitmap]::new($source)
+            } finally {
+                $source.Dispose()
+            }
+        } finally {
+            $stream.Dispose()
+        }
+    } catch {
+        return $null
+    }
+}
+
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "BUS Voltage Correction V0.7 - Batch Correction Test"
+$form.Text = "BUS Voltage Correction V$($script:AppVersion)"
 $form.Size = New-Object System.Drawing.Size(1420, 900)
 $form.MinimumSize = New-Object System.Drawing.Size(1240, 820)
 $form.StartPosition = "CenterScreen"
@@ -1740,6 +1941,40 @@ $status.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.Fo
 $status.AutoSize = $true
 $status.Location = New-Object System.Drawing.Point(825, 29)
 $top.Controls.Add($status)
+
+$script:MesLogoImage = Load-UiImage (Join-Path $PSScriptRoot "assets\mes_logo_light.png")
+$mesLogo = New-Object System.Windows.Forms.PictureBox
+$mesLogo.Location = New-Object System.Drawing.Point(($form.ClientSize.Width - 154), 7)
+$mesLogo.Size = New-Object System.Drawing.Size(132, 41)
+$mesLogo.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
+$mesLogo.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
+$mesLogo.BackColor = [System.Drawing.Color]::Transparent
+$mesLogo.Cursor = [System.Windows.Forms.Cursors]::Hand
+$mesLogo.AccessibleName = "MES logo"
+if ($script:MesLogoImage) {
+    $mesLogo.Image = $script:MesLogoImage
+    $top.Controls.Add($mesLogo)
+}
+
+$mesSiteLabel = New-Object System.Windows.Forms.Label
+$mesSiteLabel.Text = "MES-battery.de"
+$mesSiteLabel.Location = New-Object System.Drawing.Point(($form.ClientSize.Width - 154), 49)
+$mesSiteLabel.Size = New-Object System.Drawing.Size(132, 18)
+$mesSiteLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+$mesSiteLabel.Font = New-Object System.Drawing.Font("Segoe UI", 8)
+$mesSiteLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
+$mesSiteLabel.Cursor = [System.Windows.Forms.Cursors]::Hand
+$top.Controls.Add($mesSiteLabel)
+
+$openMesSite = {
+    try {
+        Start-Process "https://mes-battery.de"
+    } catch {
+        Write-Log "Unable to open MES website: $($_.Exception.Message)"
+    }
+}
+$mesLogo.Add_Click($openMesSite)
+$mesSiteLabel.Add_Click($openMesSite)
 
 $observeLabel = New-Object System.Windows.Forms.Label
 $observeLabel.Text = "Observe"
@@ -2094,12 +2329,17 @@ function Start-CalibrationFromUi {
     $script:PostCorrectionSampleIntervalSeconds = [double]$intervalBox.Value
     $script:StableConfirmSamples = [int]$observeBox.Value
     $script:StableErrorSpanLimit = [double]$stepBox.Value
-    $answer = [System.Windows.Forms.MessageBox]::Show(
-        "Start BUS voltage calibration on $($combo.SelectedItem)?`r`nTolerance: +/-$($script:Tolerance)V`r`nCorrection step: fixed 0.5V`r`nStartup: auto boot every $($BootRetrySeconds)s until BUS is ready`r`nStable reads per channel: $($script:StableConfirmSamples)`r`nStable span limit: $($script:StableErrorSpanLimit)V`r`nFinal verification: 2 consecutive stable windows",
-        "Confirm Calibration",
-        [System.Windows.Forms.MessageBoxButtons]::OKCancel,
-        [System.Windows.Forms.MessageBoxIcon]::Warning
-    )
+    $script:UserDialogActive = $true
+    try {
+        $answer = [System.Windows.Forms.MessageBox]::Show(
+            "Start BUS voltage calibration on $($combo.SelectedItem)?`r`nTolerance: +/-$($script:Tolerance)V`r`nCorrection step: fixed 0.5V`r`nStartup: auto boot every $($BootRetrySeconds)s until BUS is ready`r`nStable reads per channel: $($script:StableConfirmSamples)`r`nStable span limit: $($script:StableErrorSpanLimit)V`r`nFinal verification: 2 consecutive stable windows",
+            "Confirm Calibration",
+            [System.Windows.Forms.MessageBoxButtons]::OKCancel,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        )
+    } finally {
+        $script:UserDialogActive = $false
+    }
     if ($answer -ne [System.Windows.Forms.DialogResult]::OK) {
         Write-Log "Calibration cancelled by user."
         return
@@ -2120,16 +2360,33 @@ function Start-CalibrationFromUi {
     try {
         Calibrate-All $combo.SelectedItem
     } catch {
-        Write-Log "Calibration failed: $($_.Exception.Message)"
+        $failureMessage = $_.Exception.Message
+        Write-Log "Calibration failed: $failureMessage"
         $customerStatus.Text = "Calibration failed. Check inverter startup, wiring, or COM connection."
         $customerStatus.ForeColor = $Theme.Bad
         $status.Text = "Ready"
-        [System.Windows.Forms.MessageBox]::Show(
-            "Calibration failed.`r`n`r`n$($_.Exception.Message)`r`n`r`nPlease confirm only AC Grid is connected before calibration.",
-            "Calibration Failed",
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Warning
-        ) | Out-Null
+        $script:CalibrationAfter = Read-SampleSafe $combo.SelectedItem "Calibration failure"
+        if ($script:CalibrationAfter) { Update-SampleUi $script:CalibrationAfter }
+        $failureResult = "Failed: $failureMessage"
+        Update-CalibrationResultSummary $failureResult
+        $failureReport = $null
+        try {
+            $failureReport = Write-CalibrationReport $combo.SelectedItem $failureResult
+        } catch {
+            Write-Log "Unable to write calibration failure report: $($_.Exception.Message)"
+        }
+        $reportMessage = if ($failureReport) { "`r`n`r`nReport: $failureReport" } else { "" }
+        $script:UserDialogActive = $true
+        try {
+            [System.Windows.Forms.MessageBox]::Show(
+                "Calibration failed.`r`n`r`n$failureMessage`r`n`r`nPlease confirm only AC Grid is connected before calibration.$reportMessage",
+                "Calibration Failed",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning
+            ) | Out-Null
+        } finally {
+            $script:UserDialogActive = $false
+        }
     } finally {
         $script:CalibrationActive = $false
         $scanButton.Enabled = $true
@@ -2297,6 +2554,7 @@ $log.ForeColor = $Theme.Text
 $summaryStatus.BackColor = $Theme.Surface
 $summaryStatus.ForeColor = $Theme.Muted
 $status.ForeColor = $Theme.Accent
+$mesSiteLabel.ForeColor = $Theme.Muted
 
 $form.Add_Resize({
     if ($leftPanel -and $rightPanel) {
@@ -2311,7 +2569,8 @@ $form.Add_Shown({
     $form.BringToFront()
     foreach ($p in [System.IO.Ports.SerialPort]::GetPortNames() | Sort-Object) { [void]$combo.Items.Add($p) }
     if ($combo.Items.Count -gt 0) { $combo.SelectedIndex = 0 }
-    Write-Log "V0.7 batch correction GUI ready."
+    Write-Log "V$($script:AppVersion) batch correction GUI ready."
+    Start-GitHubUpdateCheck
     $form.TopMost = $false
 })
 
@@ -2319,7 +2578,12 @@ $form.Add_FormClosed({
     $monitorReadTimer.Stop()
     $manualQueueTimer.Stop()
     $barsAnimationTimer.Stop()
+    Stop-GitHubUpdateRequest
     Close-SerialConnection
+    if ($script:MesLogoImage) {
+        $script:MesLogoImage.Dispose()
+        $script:MesLogoImage = $null
+    }
 })
 
 [System.Windows.Forms.Application]::Run($form)
