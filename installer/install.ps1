@@ -5,6 +5,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$appVersion = "0.8.0"
 $appScriptName = "BUS_voltage_correction_desktop_test_V0.7.ps1"
 $launcherName = "open_desktop_gui_V0.7.bat"
 
@@ -35,7 +36,7 @@ if (-not $SkipShortcuts) {
         $shortcut.Arguments = $launchArguments
         $shortcut.WorkingDirectory = $InstallRoot
         $shortcut.IconLocation = "$env:SystemRoot\System32\imageres.dll,67"
-        $shortcut.Description = "BUS Voltage Correction V0.7.1"
+        $shortcut.Description = "BUS Voltage Correction V$appVersion"
         $shortcut.Save()
     }
 
@@ -50,7 +51,7 @@ if (-not $SkipRegistration) {
     $uninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\BUSVoltageCorrection"
     New-Item -Path $uninstallKey -Force | Out-Null
     Set-ItemProperty -Path $uninstallKey -Name DisplayName -Value "BUS Voltage Correction"
-    Set-ItemProperty -Path $uninstallKey -Name DisplayVersion -Value "0.7.1"
+    Set-ItemProperty -Path $uninstallKey -Name DisplayVersion -Value $appVersion
     Set-ItemProperty -Path $uninstallKey -Name Publisher -Value "FSP"
     Set-ItemProperty -Path $uninstallKey -Name InstallLocation -Value $InstallRoot
     Set-ItemProperty -Path $uninstallKey -Name DisplayIcon -Value "$env:SystemRoot\System32\imageres.dll,67"

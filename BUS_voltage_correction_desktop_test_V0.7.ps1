@@ -35,7 +35,7 @@ $Theme = @{
     Info = [System.Drawing.Color]::FromArgb(94, 157, 255)
 }
 
-$script:AppVersion = "0.7.1"
+$script:AppVersion = "0.8.0"
 $script:GitHubRepository = "tatsuo25103/BUS-Voltage-Correction"
 $script:GitHubReleasesUrl = "https://github.com/$($script:GitHubRepository)/releases"
 $script:UpdateCheckTimeoutSeconds = 4.0
@@ -70,6 +70,9 @@ $TrendStartMaxError = 25.0
 $ReadSampleMaxRetries = 3
 $ProbeMaxAttempts = 3
 $ProbeRetrySeconds = 0.8
+$PhaseDetectionSampleCount = 3
+$SinglePhaseGridMinimumVoltage = 80.0
+$SinglePhaseUnusedPhaseMaximumVoltage = 30.0
 $ResponseWindowCommands = 6
 $ResponseWindowMovementThreshold = 0.5
 $ResponseDirectionConfirmCommands = 3
@@ -93,6 +96,7 @@ $script:SessionLogPath = Join-Path $script:LogDirectory ("session_log_{0}.txt" -
 $script:StopRequested = $false
 $script:MonitoringActive = $false
 $script:CalibrationActive = $false
+$script:InverterPhaseMode = "Unknown"
 $script:SerialOperationActive = $false
 $script:SerialLock = New-Object Object
 $script:SerialPort = $null
@@ -390,6 +394,157 @@ function Parse-DeciVolt($fields, $index) {
     return [int]$raw / 10.0
 }
 
+function Parse-DeciVoltOptional($fields, $index) {
+    if ($index -ge $fields.Count) { return 0.0 }
+    $raw = ($fields[$index].ToCharArray() | Where-Object { "+-0123456789".Contains($_) }) -join ""
+    if (-not $raw) { return 0.0 }
+    return [int]$raw / 10.0
+}
+
+function Get-TargetVoltage([double]$vr, [double]$vs, [double]$vt) {
+    if ($script:InverterPhaseMode -eq "SinglePhase") {
+        return $TargetFactor * $vr
+    }
+    return $TargetFactor * [Math]::Max($vr, [Math]::Max($vs, $vt))
+}
+
+function Test-PossibleSinglePhaseSample($sample) {
+    if ($null -eq $sample) { return $false }
+    return (
+        ([Math]::Abs([double]$sample.VR) -ge $SinglePhaseGridMinimumVoltage) -and
+        ([Math]::Abs([double]$sample.VS) -le $SinglePhaseUnusedPhaseMaximumVoltage) -and
+        ([Math]::Abs([double]$sample.VT) -le $SinglePhaseUnusedPhaseMaximumVoltage)
+    )
+}
+
+function Test-MissingAcPhaseSample($sample) {
+    if ($null -eq $sample) { return $false }
+    $presentCount = 0
+    $nearZeroCount = 0
+    foreach ($name in @("VR", "VS", "VT")) {
+        $voltage = [Math]::Abs([double]$sample.$name)
+        if ($voltage -ge $SinglePhaseGridMinimumVoltage) {
+            $presentCount += 1
+        } elseif ($voltage -le $SinglePhaseUnusedPhaseMaximumVoltage) {
+            $nearZeroCount += 1
+        }
+    }
+    return ($presentCount -eq 2 -and $nearZeroCount -eq 1)
+}
+
+function Test-ThreePhaseSample($sample) {
+    if ($null -eq $sample) { return $false }
+    foreach ($name in @("VR", "VS", "VT")) {
+        if ([Math]::Abs([double]$sample.$name) -lt $SinglePhaseGridMinimumVoltage) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Get-MissingAcPhaseName($sample) {
+    if ($null -eq $sample) { return "Unknown" }
+    foreach ($name in @("VR", "VS", "VT")) {
+        if ([Math]::Abs([double]$sample.$name) -le $SinglePhaseUnusedPhaseMaximumVoltage) {
+            return $name
+        }
+    }
+    return "Unknown"
+}
+
+function Confirm-InverterPhaseMode($portName, $initialSample) {
+    $script:InverterPhaseMode = "Unknown"
+    $samples = New-Object System.Collections.ArrayList
+    if ($initialSample) { [void]$samples.Add($initialSample) }
+
+    while ($samples.Count -lt $PhaseDetectionSampleCount) {
+        if ($script:StopRequested) { return $false }
+        Wait-WithUi 0.5
+        $sample = Read-Sample $portName
+        [void]$samples.Add($sample)
+        Update-SampleUi $sample
+    }
+
+    $singlePhaseMatches = 0
+    $missingPhaseMatches = 0
+    $threePhaseMatches = 0
+    foreach ($sample in $samples) {
+        if (Test-PossibleSinglePhaseSample $sample) { $singlePhaseMatches += 1 }
+        if (Test-MissingAcPhaseSample $sample) { $missingPhaseMatches += 1 }
+        if (Test-ThreePhaseSample $sample) { $threePhaseMatches += 1 }
+    }
+
+    $lastSample = $samples[$samples.Count - 1]
+    Write-Log ("Phase detection: single-phase={0}/{1}, missing-phase={2}/{1}, three-phase={3}/{1}. Latest VR={4:N1}V VS={5:N1}V VT={6:N1}V" -f `
+        $singlePhaseMatches, $PhaseDetectionSampleCount, $missingPhaseMatches, $threePhaseMatches, $lastSample.VR, $lastSample.VS, $lastSample.VT)
+
+    if ($missingPhaseMatches -eq $PhaseDetectionSampleCount) {
+        $missingPhase = Get-MissingAcPhaseName $lastSample
+        Write-Log "CUSTOMER ALERT: $missingPhase remained near zero while the other two AC phases were present. Calibration cancelled."
+        $customerStatus.Text = "$missingPhase is missing. Calibration stopped; check the inverter and AC Grid input."
+        $customerStatus.ForeColor = $Theme.Bad
+        $script:UserDialogActive = $true
+        try {
+            [System.Windows.Forms.MessageBox]::Show(
+                "One AC phase ($missingPhase) remained near zero in three consecutive readings while the other two phases were present.`r`n`r`nThis indicates an AC phase loss or inverter fault.`r`n`r`nCalibration has been cancelled. Check the inverter and AC Grid input before trying again.",
+                "AC Phase Missing",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Error
+            ) | Out-Null
+        } finally {
+            $script:UserDialogActive = $false
+        }
+        return $false
+    } elseif ($singlePhaseMatches -eq $PhaseDetectionSampleCount) {
+        $script:UserDialogActive = $true
+        try {
+            $answer = [System.Windows.Forms.MessageBox]::Show(
+                "Only VR has valid AC input voltage in three consecutive readings.`r`nVS and VT are absent or near zero.`r`n`r`nThis may be a 5 kW single-phase inverter.`r`n`r`nConfirm this is a 5 kW single-phase model and continue calibration?`r`n`r`nSelect No to cancel and check the inverter model and AC Grid wiring.",
+                "Confirm Single-Phase Inverter",
+                [System.Windows.Forms.MessageBoxButtons]::YesNo,
+                [System.Windows.Forms.MessageBoxIcon]::Question
+            )
+        } finally {
+            $script:UserDialogActive = $false
+        }
+        if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) {
+            Write-Log "Calibration cancelled: possible single-phase inverter was not confirmed."
+            $customerStatus.Text = "Calibration cancelled. Confirm inverter model and AC Grid wiring."
+            $customerStatus.ForeColor = $Theme.Info
+            return $false
+        }
+        $script:InverterPhaseMode = "SinglePhase"
+        Write-Log "Inverter profile confirmed by user: 5 kW single phase. Target uses VR x $TargetFactor."
+        $customerStatus.Text = "5 kW single-phase inverter confirmed."
+        $customerStatus.ForeColor = $Theme.Good
+    } elseif ($threePhaseMatches -eq $PhaseDetectionSampleCount) {
+        $script:InverterPhaseMode = "ThreePhase"
+        Write-Log "Inverter profile selected: three phase. Target uses max(VR, VS, VT) x $TargetFactor."
+    } else {
+        Write-Log "CUSTOMER ALERT: unable to identify a safe AC phase configuration from three consecutive readings. Calibration cancelled."
+        $customerStatus.Text = "Unable to identify inverter phase configuration. Calibration stopped."
+        $customerStatus.ForeColor = $Theme.Bad
+        $script:UserDialogActive = $true
+        try {
+            [System.Windows.Forms.MessageBox]::Show(
+                "The AC input readings do not match a valid three-phase inverter, a confirmed 5 kW single-phase inverter, or a single missing phase.`r`n`r`nLatest readings:`r`nVR: $($lastSample.VR.ToString('N1')) V`r`nVS: $($lastSample.VS.ToString('N1')) V`r`nVT: $($lastSample.VT.ToString('N1')) V`r`n`r`nCalibration has been cancelled. Check AC Grid wiring and the inverter model before trying again.",
+                "Unable to Identify Inverter",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Error
+            ) | Out-Null
+        } finally {
+            $script:UserDialogActive = $false
+        }
+        return $false
+    }
+
+    foreach ($sample in $samples) {
+        $sample.Target = Get-TargetVoltage $sample.VR $sample.VS $sample.VT
+    }
+    Update-SampleUi $lastSample
+    return $true
+}
+
 function Read-SampleOnce($portName) {
     [System.Threading.Monitor]::Enter($script:SerialLock)
     try {
@@ -400,16 +555,16 @@ function Read-SampleOnce($portName) {
     }
     $gsFields = $gs.Trim().Split(",")
     $ingsFields = $ings.Trim().Split(",")
-    if ($gsFields.Count -le 9) {
-        throw "GS response incomplete: expected field 9, got $($gsFields.Count). raw='$($gs.Trim())'"
+    if ($gsFields.Count -le 7) {
+        throw "GS response incomplete: expected field 7, got $($gsFields.Count). raw='$($gs.Trim())'"
     }
     if ($ingsFields.Count -le 9) {
         throw "INGS response incomplete: expected field 9, got $($ingsFields.Count). raw='$($ings.Trim())'"
     }
     $vr = Parse-DeciVolt $gsFields 7
-    $vs = Parse-DeciVolt $gsFields 8
-    $vt = Parse-DeciVolt $gsFields 9
-    $target = $TargetFactor * [Math]::Max($vr, [Math]::Max($vs, $vt))
+    $vs = Parse-DeciVoltOptional $gsFields 8
+    $vt = Parse-DeciVoltOptional $gsFields 9
+    $target = Get-TargetVoltage $vr $vs $vt
     $sample = [pscustomobject]@{
         Time = Get-Date
         VR = $vr
@@ -1106,6 +1261,7 @@ function Write-CalibrationReport($portName, $statusText) {
     $lines.Add("BUS Voltage Correction Report")
     $lines.Add(("Time: {0}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss")))
     $lines.Add("Port: $portName")
+    $lines.Add("Inverter phase mode: $($script:InverterPhaseMode)")
     $lines.Add("Result: $statusText")
     $lines.Add("Tolerance: +/-$($script:Tolerance)V")
     $lines.Add("Probe retry: $ProbeMaxAttempts attempt(s), $($ProbeRetrySeconds)s between attempts")
@@ -1158,6 +1314,7 @@ function Write-CalibrationReport($portName, $statusText) {
 
 function Calibrate-All($portName) {
     $script:StopRequested = $false
+    $script:InverterPhaseMode = "Unknown"
     $script:CalibrationSteps.Clear()
     $script:CalibrationLogStartIndex = $script:EventLogLines.Count
     $script:CalibrationBefore = $null
@@ -1166,9 +1323,17 @@ function Calibrate-All($portName) {
     $script:Samples.Clear()
     $script:TrendBusReady = $false
     $status.Text = "Calibrating"
-    $customerStatus.Text = "Checking inverter startup before BUS voltage calibration..."
+    $customerStatus.Text = "Checking inverter phase configuration before startup..."
     $customerStatus.ForeColor = $Theme.Info
     Write-Log "Starting V$($script:AppVersion) batch calibration on $portName. Max batch rounds: $script:MaxBatchRounds, tolerance=+/-$($script:Tolerance)V, fixed step=0.5V"
+    $phaseProbeSample = Read-Sample $portName
+    Update-SampleUi $phaseProbeSample
+    if (-not (Confirm-InverterPhaseMode $portName $phaseProbeSample)) {
+        $status.Text = "Ready"
+        return
+    }
+    $customerStatus.Text = "Checking inverter startup before BUS voltage calibration..."
+    $customerStatus.ForeColor = $Theme.Info
     $script:CalibrationBefore = Ensure-InverterReady $portName
     Update-SampleUi $script:CalibrationBefore
     $customerStatus.Text = "Calibrating BUS voltage with 4-channel batch correction..."
@@ -2540,6 +2705,7 @@ $combo.Add_SelectedIndexChanged({
     if ($script:SerialPortName -and $combo.SelectedItem -and $script:SerialPortName -ne [string]$combo.SelectedItem) {
         Close-SerialConnection
     }
+    $script:InverterPhaseMode = "Unknown"
 })
 
 Apply-ThemeRecursive $form

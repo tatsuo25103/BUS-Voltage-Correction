@@ -3,7 +3,7 @@
 **English (default)** · [繁體中文](README.zh-TW.md)
 
 Windows desktop utility for monitoring and calibrating the DC BUS voltage
-measurement channels of FSP PowerManager Hybrid 10 kW and 15 kW inverters.
+measurement channels of FSP PowerManager Hybrid 5 kW, 10 kW and 15 kW inverters.
 It locates the inverter COM port, starts the inverter when required, waits for
 each channel to stabilize and corrects `VDSPP`, `VDSPN`, `VMCUP` and `VMCUN`
 against the calculated BUS target.
@@ -13,7 +13,7 @@ against the calculated BUS target.
 > and the applicable FSP service instructions.
 
 [Download the latest release](https://github.com/tatsuo25103/BUS-Voltage-Correction/releases/latest)
-· [V0.7.1 release notes](docs/RELEASE_NOTES_V0.7.1.md)
+· [V0.8.0 release notes](docs/RELEASE_NOTES_V0.8.0.md)
 · [Traditional Chinese instructions](README.zh-TW.md)
 
 ## 1. Installation
@@ -22,6 +22,7 @@ against the calculated BUS target.
 
 - FSP PowerManager Hybrid 10 kW
 - FSP PowerManager Hybrid 15 kW
+- FSP PowerManager Hybrid 5 kW single-phase model
 - Windows 10 or Windows 11
 - USB-to-RS232 adapter with the appropriate Windows driver
 
@@ -30,7 +31,7 @@ Communication is `2400 baud`, `8 data bits`, no parity and `1 stop bit`
 
 ### 1.2 Install the application
 
-1. Download `BUS_Voltage_Correction_Setup_V0.7.1.exe` from
+1. Download `BUS_Voltage_Correction_Setup_V0.8.0.exe` from
    [GitHub Releases](https://github.com/tatsuo25103/BUS-Voltage-Correction/releases/latest).
 2. Run the installer. It installs for the current Windows user and creates
    Desktop and Start Menu shortcuts.
@@ -87,9 +88,12 @@ command every 10 seconds until BUS voltage rises and becomes ready.
    **Tolerance** when the service requirement calls for it. Normal is `5.0 V`;
    the selectable range is `1.0-5.0 V`.
 5. Click **Calibrate**, review the safety confirmation and continue.
-6. Follow **Customer Status**. Do not disconnect AC Grid or communication while
+6. If only VR is present while VS and VT remain near zero, confirm the inverter
+   is a 5 kW single-phase model. A single missing phase or an unidentified phase
+   configuration stops calibration.
+7. Follow **Customer Status**. Do not disconnect AC Grid or communication while
    calibration is running.
-7. Wait for **Calibration success**. Click **Open Logs** for the report and
+8. Wait for **Calibration success**. Click **Open Logs** for the report and
    session log.
 
 ![Application overview](docs/user_manual_assets/application_overview.png)
@@ -137,7 +141,10 @@ automatic calibration is the normal workflow.
 
 ```mermaid
 flowchart TD
-    A["Scan COM ports and verify inverter identity"] --> B{"Inverter BUS ready?"}
+    A["Scan COM ports and verify inverter identity"] --> P{"Three consistent AC phase readings"}
+    P -- "VR only; user confirms 5 kW" --> B{"Inverter BUS ready?"}
+    P -- "All three phases valid" --> B
+    P -- "One phase missing or configuration unknown" --> PX["Stop and show phase/wiring warning"]
     B -- "No" --> C["Send boot commands; retry every 10 seconds"]
     C --> B
     B -- "Yes" --> D["Track VDSPP, VDSPN, VMCUP and VMCUN stability independently"]
@@ -159,6 +166,10 @@ channels are corrected in the same batch round.
 
 Protection rules include:
 
+- phase configuration is checked before boot commands or calibration writes;
+- 5 kW single-phase mode requires VR to be present, VS and VT to be near zero
+  for three consecutive samples, and explicit user confirmation;
+- one missing AC phase or any unidentified phase configuration stops calibration;
 - fixed `0.5 V` automatic corrections;
 - repeated opposite-direction or worsening movement stops calibration;
 - six same-direction commands (3.0 V requested) with less than 0.5 V net
@@ -187,6 +198,9 @@ and Event Log. Files are stored per Windows user in:
 | No COM port found | Check adapter, Windows driver and RS232 connection; reconnect and scan again. |
 | `Access to the port is denied` | Exit SolarPower and other serial tools, then reopen the application. |
 | Inverter does not start | Confirm AC Grid. Boot commands retry every 10 seconds for up to four minutes. |
+| 5 kW single-phase confirmation appears | Confirm the inverter model. Select No if it is a 10/15 kW unit and check all three AC Grid phases. |
+| `AC Phase Missing` | One of VR, VS or VT remained near zero while the other two were present. Stop and check the inverter and AC Grid input. |
+| Unable to identify inverter | AC input does not consistently match supported single-phase or three-phase conditions. Check the model, wiring and grid voltage. |
 | Communication is interrupted | Keep the cable connected. Monitor retries automatically; inspect cable quality if failures continue. |
 | Channel does not move after six corrections | Stop and confirm AC Output, PV, BAT and parallel cable are disconnected. |
 | Channel moves opposite or becomes worse | Stop and inspect inverter state, wiring and command compatibility. |
@@ -199,9 +213,9 @@ At startup the application checks GitHub Releases in the background. A prompt
 appears only when calibration, manual correction and other dialogs are idle.
 Offline or failed checks do not interrupt operation.
 
-V0.7.1 adds the background update check, MES branding, improved failure reports
-and stable pre-correction voltage capture. See the
-[V0.7.1 release notes](docs/RELEASE_NOTES_V0.7.1.md). Previous packages remain
+V0.8.0 adds pre-boot single-phase confirmation, missing-phase protection and
+safe handling of optional VS/VT fields for the 5 kW model. See the
+[V0.8.0 release notes](docs/RELEASE_NOTES_V0.8.0.md). Previous packages remain
 on the [Releases page](https://github.com/tatsuo25103/BUS-Voltage-Correction/releases).
 
 The original console-based V0.5 source is preserved as a

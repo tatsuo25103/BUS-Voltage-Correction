@@ -2,7 +2,7 @@
 
 [English（預設）](README.md) · **繁體中文**
 
-這是用於 FSP PowerManager Hybrid 10 kW／15 kW 逆變器的 Windows 桌面工具，
+這是用於 FSP PowerManager Hybrid 5 kW／10 kW／15 kW 逆變器的 Windows 桌面工具，
 可監看並校正 DC BUS 電壓量測通道 `VDSPP`、`VDSPN`、`VMCUP`、`VMCUN`。
 程式會尋找逆變器所在的 COM Port，必要時嘗試啟動逆變器，分別等待每個通道
 穩定，再依 BUS Target 進行校正。
@@ -11,7 +11,7 @@
 > 必須依照下列隔離程序與 FSP 維修規範操作。
 
 [下載最新版本](https://github.com/tatsuo25103/BUS-Voltage-Correction/releases/latest)
-· [V0.7.1 更新資訊](docs/RELEASE_NOTES_V0.7.1.zh-TW.md)
+· [V0.8.0 更新資訊](docs/RELEASE_NOTES_V0.8.0.zh-TW.md)
 · [英文使用說明](README.md)
 
 ## 1. 安裝
@@ -20,6 +20,7 @@
 
 - FSP PowerManager Hybrid 10 kW
 - FSP PowerManager Hybrid 15 kW
+- FSP PowerManager Hybrid 5 kW 單相機種
 - Windows 10 或 Windows 11
 - 已安裝正確 Windows 驅動的 USB 轉 RS232 線
 
@@ -28,7 +29,7 @@
 ### 1.2 安裝程式
 
 1. 從 [GitHub Releases](https://github.com/tatsuo25103/BUS-Voltage-Correction/releases/latest)
-   下載 `BUS_Voltage_Correction_Setup_V0.7.1.exe`。
+   下載 `BUS_Voltage_Correction_Setup_V0.8.0.exe`。
 2. 執行安裝程式。它會安裝在目前 Windows 使用者帳號，並建立桌面與開始
    功能表捷徑。
 3. 啟動 **BUS Voltage Correction**。
@@ -81,8 +82,10 @@
 4. 進階穩定條件請保留預設值。一般只需依維修要求調整 **Tolerance**；正常
    為 `5.0 V`，可選範圍 `1.0-5.0 V`。
 5. 按 **Calibrate**，確認安全提醒後開始。
-6. 依 **Customer Status** 等待，校正中不可拔除 AC Grid 或通訊線。
-7. 等待 **Calibration success**。按 **Open Logs** 開啟報告與 Session Log。
+6. 若只有 VR 有電壓，VS、VT 持續接近 0，請確認是否為 5 kW 單相機種。
+   若只有一相缺失或相位狀態無法辨識，程式會停止校正。
+7. 依 **Customer Status** 等待，校正中不可拔除 AC Grid 或通訊線。
+8. 等待 **Calibration success**。按 **Open Logs** 開啟報告與 Session Log。
 
 ![程式主畫面](docs/user_manual_assets/application_overview.png)
 
@@ -123,7 +126,10 @@
 
 ```mermaid
 flowchart TD
-    A["掃描 COM Port 並確認逆變器識別"] --> B{"逆變器 BUS 已啟動？"}
+    A["掃描 COM Port 並確認逆變器識別"] --> P{"連續三次確認 AC 相位"}
+    P -- "只有 VR；使用者確認 5 kW" --> B{"逆變器 BUS 已啟動？"}
+    P -- "三相都有效" --> B
+    P -- "單一缺相或無法辨識" --> PX["停止並顯示相位／接線警告"]
     B -- "否" --> C["送出開機指令，每 10 秒重試"]
     C --> B
     B -- "是" --> D["四個通道分別追蹤穩定度"]
@@ -144,6 +150,9 @@ flowchart TD
 
 保護邏輯包括：
 
+- 開機指令與校正寫入前先確認相位配置；
+- 5 kW 單相模式必須連續三次確認 VR 正常、VS 與 VT 接近 0，並由使用者確認；
+- 單一 AC 缺相或任何無法辨識的相位組合都會停止校正；
 - 自動校正固定使用 `0.5 V` 指令；
 - 連續反方向或誤差惡化時停止；
 - 同方向連續六次（累積要求 3.0 V），實際淨變化仍小於 0.5 V 時停止，並
@@ -170,6 +179,9 @@ flowchart TD
 | 找不到 COM Port | 檢查轉接線、Windows 驅動與 RS232 接頭，重新插拔後再 Scan。 |
 | `Access to the port is denied` | 完全退出 SolarPower 與其他 Serial 工具後重開程式。 |
 | 逆變器沒有啟動 | 確認 AC Grid；程式每 10 秒重送開機指令，最多等待四分鐘。 |
+| 顯示 5 kW 單相確認 | 確認逆變器機型；若是 10/15 kW，請選 No 並檢查三相 AC Grid。 |
+| 顯示 `AC Phase Missing` | VR、VS、VT 其中一相持續接近 0，另外兩相正常；停止並檢查逆變器與 AC Grid。 |
+| 無法辨識逆變器 | AC 輸入未穩定符合支援的單相或三相條件；檢查機型、接線與電網電壓。 |
 | 通訊偶爾中斷 | 保持線材連接；Monitor 自動重試，持續失敗時檢查線材品質。 |
 | 六次修正後幾乎不動 | 停止並確認 AC Output、PV、BAT、並聯訊號線都已斷開。 |
 | 朝相反方向或誤差惡化 | 停止並檢查逆變器狀態、接線與指令相容性。 |
@@ -181,8 +193,8 @@ flowchart TD
 程式啟動時會在背景檢查 GitHub Releases。只有目前沒有校正、Manual
 Correction 或其他對話框時才顯示新版提示；離線或檢查失敗不會中斷操作。
 
-V0.7.1 新增背景更新檢查、MES Logo、失敗報告保護與校正前穩定電壓紀錄。
-詳見 [V0.7.1 更新資訊](docs/RELEASE_NOTES_V0.7.1.zh-TW.md)。舊版保留在
+V0.8.0 新增開機前單相確認、缺相保護，以及 5 kW 機種 VS／VT 選用欄位的
+安全解析。詳見 [V0.8.0 更新資訊](docs/RELEASE_NOTES_V0.8.0.zh-TW.md)。舊版保留在
 [Releases](https://github.com/tatsuo25103/BUS-Voltage-Correction/releases)。
 
 原始 Console V0.5 程式已保存為

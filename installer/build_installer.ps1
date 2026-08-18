@@ -1,11 +1,12 @@
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
+$version = "0.8.0"
 $buildRoot = Join-Path $env:TEMP ("BUSVC_Installer_{0}" -f ([Guid]::NewGuid().ToString("N")))
 $stagingRoot = Join-Path $buildRoot "staging"
 $releaseRoot = Join-Path $projectRoot "release"
-$setupPath = Join-Path $releaseRoot "BUS_Voltage_Correction_Setup_V0.7.1.exe"
-$temporarySetupPath = Join-Path $buildRoot "BUS_Voltage_Correction_Setup_V0.7.1.exe"
-$sedPath = Join-Path $buildRoot "BUS_Voltage_Correction_V0.7.1.sed"
+$setupPath = Join-Path $releaseRoot "BUS_Voltage_Correction_Setup_V$version.exe"
+$temporarySetupPath = Join-Path $buildRoot "BUS_Voltage_Correction_Setup_V$version.exe"
+$sedPath = Join-Path $buildRoot "BUS_Voltage_Correction_V$version.sed"
 
 New-Item -ItemType Directory -Path $stagingRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $releaseRoot -Force | Out-Null
@@ -55,11 +56,11 @@ AdminQuietInstCmd=%AdminQuietInstCmd%
 UserQuietInstCmd=%UserQuietInstCmd%
 SourceFiles=SourceFiles
 [Strings]
-InstallPrompt=Install BUS Voltage Correction V0.7.1 for the current Windows user?
+InstallPrompt=Install BUS Voltage Correction V$version for the current Windows user?
 DisplayLicense=
-FinishMessage=BUS Voltage Correction V0.7.1 installation completed.
+FinishMessage=BUS Voltage Correction V$version installation completed.
 TargetName=$temporarySetupPath
-FriendlyName=BUS Voltage Correction V0.7.1 Setup
+FriendlyName=BUS Voltage Correction V$version Setup
 AppLaunched=install.cmd
 PostInstallCmd=<None>
 AdminQuietInstCmd=
