@@ -203,3 +203,7 @@ V0.7.1 adds the background update check, MES branding, improved failure reports
 and stable pre-correction voltage capture. See the
 [V0.7.1 release notes](docs/RELEASE_NOTES_V0.7.1.md). Previous packages remain
 on the [Releases page](https://github.com/tatsuo25103/BUS-Voltage-Correction/releases).
+
+The original console-based V0.5 source is preserved as a
+[historical development baseline](docs/RELEASE_NOTES_V0.5.md). It is published
+as a pre-release and is not recommended for current service work.

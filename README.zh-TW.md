@@ -184,3 +184,7 @@ Correction 或其他對話框時才顯示新版提示；離線或檢查失敗不
 V0.7.1 新增背景更新檢查、MES Logo、失敗報告保護與校正前穩定電壓紀錄。
 詳見 [V0.7.1 更新資訊](docs/RELEASE_NOTES_V0.7.1.zh-TW.md)。舊版保留在
 [Releases](https://github.com/tatsuo25103/BUS-Voltage-Correction/releases)。
+
+原始 Console V0.5 程式已保存為
+[歷史開發初版](docs/RELEASE_NOTES_V0.5.zh-TW.md)。此版本以 Pre-release
+發佈，不建議用於目前正式維修。
