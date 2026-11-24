@@ -14,6 +14,11 @@
 · [V0.8.0 更新資訊](docs/RELEASE_NOTES_V0.8.0.zh-TW.md)
 · [英文使用說明](README.md)
 
+開發版本：[V0.8.1 穩定性修正](docs/RELEASE_NOTES_V0.8.1.zh-TW.md)。
+
+V0.8.1 的 release 資料夾也提供免安裝 ZIP。完整解壓縮後，雙擊
+`BUS Voltage Correction.vbs` 即可啟動，不需要安裝程式或 Python。
+
 ## 1. 安裝
 
 ### 1.1 已驗證相容設備

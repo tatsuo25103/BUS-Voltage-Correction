@@ -16,6 +16,12 @@ against the calculated BUS target.
 · [V0.8.0 release notes](docs/RELEASE_NOTES_V0.8.0.md)
 · [Traditional Chinese instructions](README.zh-TW.md)
 
+Development build: [V0.8.1 reliability fixes](docs/RELEASE_NOTES_V0.8.1.md).
+
+The V0.8.1 release folder also contains a portable ZIP. Extract the complete
+folder and double-click `BUS Voltage Correction.vbs`; no installation or Python
+runtime is required.
+
 ## 1. Installation
 
 ### 1.1 Verified compatible equipment

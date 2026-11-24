@@ -5,9 +5,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$appVersion = "0.8.0"
-$appScriptName = "BUS_voltage_correction_desktop_test_V0.7.ps1"
-$launcherName = "open_desktop_gui_V0.7.bat"
+$appVersion = "0.8.1"
+$appScriptName = "BUS_Voltage_Correction.ps1"
+$launcherName = "open_desktop_gui.bat"
 
 New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
 $assetRoot = Join-Path $InstallRoot "assets"

@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$version = "0.8.0"
+$version = "0.8.1"
 $buildRoot = Join-Path $env:TEMP ("BUSVC_Installer_{0}" -f ([Guid]::NewGuid().ToString("N")))
 $stagingRoot = Join-Path $buildRoot "staging"
 $releaseRoot = Join-Path $projectRoot "release"
@@ -12,8 +12,8 @@ New-Item -ItemType Directory -Path $stagingRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $releaseRoot -Force | Out-Null
 
 $packageFiles = @(
-    @{ Source = (Join-Path $projectRoot "BUS_voltage_correction_desktop_test_V0.7.ps1"); Name = "BUS_voltage_correction_desktop_test_V0.7.ps1" },
-    @{ Source = (Join-Path $projectRoot "open_desktop_gui_V0.7.bat"); Name = "open_desktop_gui_V0.7.bat" },
+    @{ Source = (Join-Path $projectRoot "BUS_Voltage_Correction.ps1"); Name = "BUS_Voltage_Correction.ps1" },
+    @{ Source = (Join-Path $projectRoot "open_desktop_gui.bat"); Name = "open_desktop_gui.bat" },
     @{ Source = (Join-Path $PSScriptRoot "install.cmd"); Name = "install.cmd" },
     @{ Source = (Join-Path $PSScriptRoot "install.ps1"); Name = "install.ps1" },
     @{ Source = (Join-Path $PSScriptRoot "uninstall.ps1"); Name = "uninstall.ps1" },

@@ -35,7 +35,7 @@ $Theme = @{
     Info = [System.Drawing.Color]::FromArgb(94, 157, 255)
 }
 
-$script:AppVersion = "0.8.0"
+$script:AppVersion = "0.8.1"
 $script:GitHubRepository = "tatsuo25103/BUS-Voltage-Correction"
 $script:GitHubReleasesUrl = "https://github.com/$($script:GitHubRepository)/releases"
 $script:UpdateCheckTimeoutSeconds = 4.0
@@ -62,12 +62,12 @@ $script:MaxBatchRounds = 30
 $script:StableConfirmSamples = 4
 $script:StableConfirmMaxAttempts = 3
 $script:StableErrorSpanLimit = 0.8
-$StableRequiredForCalibration = $true
 $BootRetrySeconds = 10.0
 $BootReadyMaxError = 25.0
 $BootReadyTimeoutSeconds = 240.0
 $TrendStartMaxError = 25.0
 $ReadSampleMaxRetries = 3
+$MaxResponseBytes = 4096
 $ProbeMaxAttempts = 3
 $ProbeRetrySeconds = 0.8
 $PhaseDetectionSampleCount = 3
@@ -338,10 +338,17 @@ function Send-Command($portName, $command, $timeoutMs = 2000) {
         $responseComplete = $false
         $start = Get-Date
         while (((Get-Date) - $start).TotalMilliseconds -lt $timeoutMs) {
+            [System.Windows.Forms.Application]::DoEvents()
+            if ($script:CalibrationActive -and $script:StopRequested) {
+                throw [System.OperationCanceledException]::new("Operation cancelled by user.")
+            }
             try {
                 $b = $sp.ReadByte()
                 if ($b -ge 0) {
                     $buffer.Add([byte]$b)
+                    if ($buffer.Count -gt $MaxResponseBytes) {
+                        throw "Response from $portName exceeded $MaxResponseBytes bytes."
+                    }
                     if ($b -eq 13) {
                         $responseComplete = $true
                         break
@@ -389,16 +396,21 @@ function Test-InverterPort($portName) {
 
 function Parse-DeciVolt($fields, $index) {
     if ($index -ge $fields.Count) { throw "missing field index $index" }
-    $raw = ($fields[$index].ToCharArray() | Where-Object { "+-0123456789".Contains($_) }) -join ""
-    if (-not $raw) { throw "empty field index $index" }
+    $raw = ([string]$fields[$index]).Trim()
+    if ([string]::IsNullOrWhiteSpace($raw)) { throw "empty field index $index" }
+    if ($raw -notmatch '^[+-]?\d+$') { throw "invalid numeric field index ${index}: '$raw'" }
     return [int]$raw / 10.0
 }
 
 function Parse-DeciVoltOptional($fields, $index) {
     if ($index -ge $fields.Count) { return 0.0 }
-    $raw = ($fields[$index].ToCharArray() | Where-Object { "+-0123456789".Contains($_) }) -join ""
-    if (-not $raw) { return 0.0 }
-    return [int]$raw / 10.0
+    $raw = ([string]$fields[$index]).Trim()
+    if ([string]::IsNullOrWhiteSpace($raw)) { return 0.0 }
+    return Parse-DeciVolt $fields $index
+}
+
+function Test-TelemetryHeader($fields) {
+    return ($null -ne $fields -and $fields.Count -gt 0 -and ([string]$fields[0]) -match '^\^D\d+$')
 }
 
 function Get-TargetVoltage([double]$vr, [double]$vs, [double]$vt) {
@@ -555,6 +567,12 @@ function Read-SampleOnce($portName) {
     }
     $gsFields = $gs.Trim().Split(",")
     $ingsFields = $ings.Trim().Split(",")
+    if (-not (Test-TelemetryHeader $gsFields)) {
+        throw "GS response header is invalid. raw='$($gs.Trim())'"
+    }
+    if (-not (Test-TelemetryHeader $ingsFields)) {
+        throw "INGS response header is invalid. raw='$($ings.Trim())'"
+    }
     if ($gsFields.Count -le 7) {
         throw "GS response incomplete: expected field 7, got $($gsFields.Count). raw='$($gs.Trim())'"
     }
@@ -585,6 +603,9 @@ function Read-Sample($portName) {
         try {
             return Read-SampleOnce $portName
         } catch {
+            if ($script:StopRequested -or $_.Exception -is [System.OperationCanceledException]) {
+                throw [System.OperationCanceledException]::new("Operation cancelled by user.", $_.Exception)
+            }
             $lastError = $_.Exception.Message
             Write-Log ("Read sample failed {0}/{1}: {2}" -f $try, $ReadSampleMaxRetries, $lastError)
             Close-SerialConnection
@@ -675,8 +696,19 @@ function Ensure-InverterReady($portName) {
     throw "Inverter did not start within $BootReadyTimeoutSeconds seconds. Check COM connection and confirm only AC Grid is connected."
 }
 
+function Test-CorrectionAck($response) {
+    if ($null -eq $response -or $response.Count -eq 0) { return $false }
+    $responseText = [System.Text.Encoding]::ASCII.GetString($response).TrimEnd("`r", "`n")
+    return ($responseText -eq "(ACK")
+}
+
 function Invoke-CorrectionCommand($portName, $command, $key, $stepTenths) {
-    return Send-Command $portName $command
+    $response = Send-Command $portName $command
+    if (-not (Test-CorrectionAck $response)) {
+        $hex = [BitConverter]::ToString($response)
+        throw "Correction command '$command' for $key was not acknowledged. response=$hex"
+    }
+    return ,$response
 }
 
 function Update-ManualCountLabels {
@@ -754,8 +786,12 @@ function Process-ManualQueue {
         if ($ok) {
             Write-Log ("Manual queue {0}: one step completed. pending={1:+0;-0;0}" -f $nextKey, [int]$script:ManualPending[$nextKey])
         } else {
-            $script:ManualPending[$nextKey] = [int]$script:ManualPending[$nextKey] + $nextDirection
-            Write-Log ("Manual queue {0}: step failed. Pending count kept for review." -f $nextKey)
+            foreach ($key in @("VDSPP", "VDSPN", "VMCUP", "VMCUN")) {
+                $script:ManualPending[$key] = 0
+            }
+            Write-Log ("Manual queue {0}: step failed. All pending manual commands were cleared for safety." -f $nextKey)
+            $customerStatus.Text = "Manual adjustment failed. Pending commands were cleared."
+            $customerStatus.ForeColor = $Theme.Bad
             if ((Get-Variable -Name manualQueueTimer -ErrorAction SilentlyContinue) -and $manualQueueTimer.Enabled) {
                 $manualQueueTimer.Stop()
             }
@@ -1572,21 +1608,14 @@ function Draw-Bars($sender, $eventArgs) {
 
     $gridPen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(80, 255, 194, 90)), 1
     $gridPen.DashStyle = [System.Drawing.Drawing2D.DashStyle]::Dash
-    $outerPen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(210, 255, 194, 90)), 2
-    $tolerancePen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(190, 68, 220, 120)), 2
-    $tolerancePen.DashStyle = [System.Drawing.Drawing2D.DashStyle]::Dot
     $axisPen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(105, 255, 194, 90)), 1
     $thinPen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(90, 255, 194, 90)), 1
-    $arcPen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(230, 255, 194, 90)), 3
-    $arcPen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
-    $arcPen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
-    $targetArcPen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(210, 68, 220, 120)), 4
-    $targetArcPen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
-    $targetArcPen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
     $fontSmall = New-Object System.Drawing.Font("Segoe UI", 8)
     $fontHeader = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
     $fontBig = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
     $fontCenter = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
+
+    try {
 
     $textSafeMargin = 96
     $centerGap = [int]([Math]::Min(370, [Math]::Max(330, $w * 0.29)))
@@ -1677,6 +1706,8 @@ function Draw-Bars($sender, $eventArgs) {
         $bubbleBrush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(210, 65, 75, 210))
         $g.DrawEllipse($bubbleCirclePen, $eyeX - $bubbleToleranceRadius, $eyeY - $bubbleToleranceRadius, $bubbleToleranceRadius * 2, $bubbleToleranceRadius * 2)
         $g.FillEllipse($bubbleBrush, $bubbleX - $bubbleSize, $bubbleY - $bubbleSize, $bubbleSize * 2, $bubbleSize * 2)
+        $bubbleCirclePen.Dispose()
+        $bubbleBrush.Dispose()
         $g.DrawString(("Target`r`n{0:N1} V" -f $script:Latest.Target), $fontCenter, [System.Drawing.Brushes]::WhiteSmoke, $eyeX - 38, $eyeY - 31)
 
         foreach ($slot in @(
@@ -1723,12 +1754,23 @@ function Draw-Bars($sender, $eventArgs) {
             $g.DrawString($name, $fontBig, $labelBrush, $labelX, $labelY)
             $g.DrawString(("{0:N1} V" -f $script:Latest.$name), $fontSmall, [System.Drawing.Brushes]::WhiteSmoke, $labelX, $labelY + 24)
             $g.DrawString(("{0} {1:+0.0;-0.0;0.0} V" -f $directionText, $actualErr), $fontSmall, $(if ([Math]::Abs($actualErr) -le $script:Tolerance) { [System.Drawing.Brushes]::LightGreen } else { [System.Drawing.Brushes]::MistyRose }), $labelX, $labelY + 41)
+            $linePen.Dispose()
+            $labelBrush.Dispose()
         }
     }
 
     $g.DrawString(("Outer ring: tolerance +/-{0:N1} V" -f $script:Tolerance), $fontSmall, [System.Drawing.Brushes]::LightGreen, 16, $h - 17)
     $g.DrawString("Inner ring: current error", $fontSmall, [System.Drawing.Brushes]::WhiteSmoke, 185, $h - 17)
     $g.DrawString("Nonlinear scale to +/-200 V", $fontSmall, [System.Drawing.Brushes]::Silver, $w - 158, $h - 17)
+    } finally {
+        $gridPen.Dispose()
+        $axisPen.Dispose()
+        $thinPen.Dispose()
+        $fontSmall.Dispose()
+        $fontHeader.Dispose()
+        $fontBig.Dispose()
+        $fontCenter.Dispose()
+    }
 }
 
 function Get-AnglePoint([int]$cx, [int]$cy, [int]$radius, [double]$degrees) {
@@ -1886,7 +1928,7 @@ function Draw-Trend($sender, $eventArgs) {
     $w = $sender.Width
     $h = $sender.Height
     if ($script:Samples.Count -lt 2) {
-        $g.DrawString("Trend will appear after 2 samples", $form.Font, (New-Object System.Drawing.SolidBrush $Theme.Muted), $w / 2 - 90, $h / 2 - 8)
+        $g.DrawString("Trend will appear after 2 samples", $form.Font, [System.Drawing.Brushes]::Gray, $w / 2 - 90, $h / 2 - 8)
         return
     }
     $names = @("VDSPP", "VDSPN", "VMCUP", "VMCUN")
@@ -1911,32 +1953,50 @@ function Draw-Trend($sender, $eventArgs) {
     $mid = $bottom - ($bottom - $top) * (0 - $min) / ($max - $min)
 
     $borderPen = New-Object System.Drawing.Pen $Theme.Border, 1
-    $g.DrawRectangle($borderPen, $left, $top, $right - $left, $bottom - $top)
-    $latestTarget = $script:Samples[$script:Samples.Count - 1].Target
-    $g.DrawString("BUS Error vs Target (V)", $form.Font, (New-Object System.Drawing.SolidBrush $Theme.Muted), $left, 2)
+    $mutedBrush = New-Object System.Drawing.SolidBrush $Theme.Muted
+    $textBrush = New-Object System.Drawing.SolidBrush $Theme.Text
+    try {
+        $g.DrawRectangle($borderPen, $left, $top, $right - $left, $bottom - $top)
+        $latestTarget = $script:Samples[$script:Samples.Count - 1].Target
+        $g.DrawString("BUS Error vs Target (V)", $form.Font, $mutedBrush, $left, 2)
 
-    for ($tick = -1 * $maxAbs; $tick -le $maxAbs; $tick += $tickStep) {
-        $yTick = $bottom - ($bottom - $top) * ($tick - $min) / ($max - $min)
-        $penTick = if ($tick -eq 0) { New-Object System.Drawing.Pen ($Theme.Text), 2 } else { New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(48, 58, 67)), 1 }
-        $g.DrawLine($penTick, $left, [int]$yTick, $right, [int]$yTick)
-        $label = if ($tick -eq 0) { "0 V error" } else { "{0:+0;-0} V" -f $tick }
-        $g.DrawString($label, $form.Font, (New-Object System.Drawing.SolidBrush $Theme.Muted), 4, [int]$yTick - 8)
-    }
-
-    foreach ($name in $names) {
-        $pen = New-Object System.Drawing.Pen $colors[$name], 2
-        $last = $null
-        for ($i = 0; $i -lt $script:Samples.Count; $i++) {
-            $x = $left + ($right - $left) * $i / [Math]::Max(1, $script:Samples.Count - 1)
-            $err = $script:Samples[$i].$name - $script:Samples[$i].Target
-            $y = $bottom - ($bottom - $top) * ($err - $min) / ($max - $min)
-            if ($null -ne $last) { $g.DrawLine($pen, $last.X, $last.Y, [int]$x, [int]$y) }
-            $last = [System.Drawing.Point]::new([int]$x, [int]$y)
+        for ($tick = -1 * $maxAbs; $tick -le $maxAbs; $tick += $tickStep) {
+            $yTick = $bottom - ($bottom - $top) * ($tick - $min) / ($max - $min)
+            $penTick = if ($tick -eq 0) { New-Object System.Drawing.Pen ($Theme.Text), 2 } else { New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(48, 58, 67)), 1 }
+            try {
+                $g.DrawLine($penTick, $left, [int]$yTick, $right, [int]$yTick)
+                $label = if ($tick -eq 0) { "0 V error" } else { "{0:+0;-0} V" -f $tick }
+                $g.DrawString($label, $form.Font, $mutedBrush, 4, [int]$yTick - 8)
+            } finally {
+                $penTick.Dispose()
+            }
         }
-        $g.DrawString($name, $form.Font, (New-Object System.Drawing.SolidBrush $colors[$name]), $right + 8, $top + 18 * [Array]::IndexOf($names, $name))
-    }
 
-    $g.DrawString(("Target {0:N1} V" -f $latestTarget), $form.Font, (New-Object System.Drawing.SolidBrush $Theme.Text), $right + 8, [int]$mid - 9)
+        foreach ($name in $names) {
+            $pen = New-Object System.Drawing.Pen $colors[$name], 2
+            $nameBrush = New-Object System.Drawing.SolidBrush $colors[$name]
+            try {
+                $last = $null
+                for ($i = 0; $i -lt $script:Samples.Count; $i++) {
+                    $x = $left + ($right - $left) * $i / [Math]::Max(1, $script:Samples.Count - 1)
+                    $err = $script:Samples[$i].$name - $script:Samples[$i].Target
+                    $y = $bottom - ($bottom - $top) * ($err - $min) / ($max - $min)
+                    if ($null -ne $last) { $g.DrawLine($pen, $last.X, $last.Y, [int]$x, [int]$y) }
+                    $last = [System.Drawing.Point]::new([int]$x, [int]$y)
+                }
+                $g.DrawString($name, $form.Font, $nameBrush, $right + 8, $top + 18 * [Array]::IndexOf($names, $name))
+            } finally {
+                $pen.Dispose()
+                $nameBrush.Dispose()
+            }
+        }
+
+        $g.DrawString(("Target {0:N1} V" -f $latestTarget), $form.Font, $textBrush, $right + 8, [int]$mid - 9)
+    } finally {
+        $borderPen.Dispose()
+        $mutedBrush.Dispose()
+        $textBrush.Dispose()
+    }
 }
 
 function Apply-ThemeRecursive($control) {
@@ -2526,13 +2586,22 @@ function Start-CalibrationFromUi {
         Calibrate-All $combo.SelectedItem
     } catch {
         $failureMessage = $_.Exception.Message
-        Write-Log "Calibration failed: $failureMessage"
-        $customerStatus.Text = "Calibration failed. Check inverter startup, wiring, or COM connection."
-        $customerStatus.ForeColor = $Theme.Bad
+        $cancelled = $script:StopRequested -or $_.Exception -is [System.OperationCanceledException]
+        if ($cancelled) {
+            Write-Log "Calibration stopped by user during serial communication."
+            $customerStatus.Text = "Calibration stopped by user."
+            $customerStatus.ForeColor = $Theme.Info
+            $script:CalibrationAfter = $script:Latest
+            $failureResult = "Stopped by user"
+        } else {
+            Write-Log "Calibration failed: $failureMessage"
+            $customerStatus.Text = "Calibration failed. Check inverter startup, wiring, or COM connection."
+            $customerStatus.ForeColor = $Theme.Bad
+            $script:CalibrationAfter = Read-SampleSafe $combo.SelectedItem "Calibration failure"
+            if ($script:CalibrationAfter) { Update-SampleUi $script:CalibrationAfter }
+            $failureResult = "Failed: $failureMessage"
+        }
         $status.Text = "Ready"
-        $script:CalibrationAfter = Read-SampleSafe $combo.SelectedItem "Calibration failure"
-        if ($script:CalibrationAfter) { Update-SampleUi $script:CalibrationAfter }
-        $failureResult = "Failed: $failureMessage"
         Update-CalibrationResultSummary $failureResult
         $failureReport = $null
         try {
@@ -2543,12 +2612,21 @@ function Start-CalibrationFromUi {
         $reportMessage = if ($failureReport) { "`r`n`r`nReport: $failureReport" } else { "" }
         $script:UserDialogActive = $true
         try {
-            [System.Windows.Forms.MessageBox]::Show(
-                "Calibration failed.`r`n`r`n$failureMessage`r`n`r`nPlease confirm only AC Grid is connected before calibration.$reportMessage",
-                "Calibration Failed",
-                [System.Windows.Forms.MessageBoxButtons]::OK,
-                [System.Windows.Forms.MessageBoxIcon]::Warning
-            ) | Out-Null
+            if ($cancelled) {
+                [System.Windows.Forms.MessageBox]::Show(
+                    "Calibration was stopped by the user.$reportMessage",
+                    "Calibration Stopped",
+                    [System.Windows.Forms.MessageBoxButtons]::OK,
+                    [System.Windows.Forms.MessageBoxIcon]::Information
+                ) | Out-Null
+            } else {
+                [System.Windows.Forms.MessageBox]::Show(
+                    "Calibration failed.`r`n`r`n$failureMessage`r`n`r`nPlease confirm only AC Grid is connected before calibration.$reportMessage",
+                    "Calibration Failed",
+                    [System.Windows.Forms.MessageBoxButtons]::OK,
+                    [System.Windows.Forms.MessageBoxIcon]::Warning
+                ) | Out-Null
+            }
         } finally {
             $script:UserDialogActive = $false
         }

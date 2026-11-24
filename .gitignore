@@ -12,3 +12,5 @@ vendor_runtime/
 python-*-amd64.exe
 installer/*.sed
 release/*.exe
+release/*.zip
+release/*_SHA256.txt
